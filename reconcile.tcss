@@ -47,13 +47,10 @@ Account {
 }
 
 Input {
-    align: right middle;
-    content-align: right middle;
-    text-align: right;
     width: 20;
     border: none;
 }
 
 #bottom {
-    height: 7;
+    height: 15;
 }
