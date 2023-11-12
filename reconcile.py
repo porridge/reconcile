@@ -20,7 +20,8 @@ from textual.containers import ScrollableContainer
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
+
 
 class Account(Static):
     """An account reconciliation widget."""
@@ -100,6 +101,9 @@ class ReconcileApp(App):
         "Dummy:Baz": 0,
         "Dummy2:Baz": 190000.0,
     }
+    DUMMY_DATE = "2023-11-12"
+    DUMMY_WRITE_OFF_ACCOUNT = "Losses"
+    DUMMY_CURRENCY = "PLN"
 
     def compose(self) -> ComposeResult:
         """Called to add widgets to the app."""
@@ -109,11 +113,23 @@ class ReconcileApp(App):
             for k in self.DUMMY_DATA:
                 yield Account(id=k)
         with Horizontal(id="bottom"):
-            yield Button("Load")
+            with Vertical():
+                yield Button("Load", id="load")
+                yield Button("Quit and reconcile", id="quit")
             yield RichLog()
 
-    def on_button_pressed(self):
-        self.load_data()
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "load":
+            self.load_data()
+        elif event.button.id == "quit":
+            postings = []
+            write_off = 0
+            for acct in self.query(Account):
+                postings.append(f"  {acct.id}  = {acct.actual:.2f} {self.DUMMY_CURRENCY}")
+                write_off += acct.diff
+            postings.append(f"  {self.DUMMY_WRITE_OFF_ACCOUNT}  {-write_off:.2f} {self.DUMMY_CURRENCY}")
+            reconcile_transaction = "\n".join([f"{self.DUMMY_DATE} reconcile", *postings])
+            self.exit(reconcile_transaction)
 
     def on_mount(self):
         self.load_data()
@@ -134,4 +150,6 @@ class ReconcileApp(App):
 
 if __name__ == "__main__":
     app = ReconcileApp()
-    app.run()
+    result = app.run()
+    if result:
+        print(result)
