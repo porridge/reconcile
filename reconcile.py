@@ -15,8 +15,14 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+import datetime
+import re
+import subprocess
+
+from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import ScrollableContainer
+from textual.events import Mount
 from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
@@ -85,60 +91,84 @@ class Account(Static):
             diff_widget.add_class('success')
         return diff_widget
 
+    def set_booked(self, value):
+        self.booked = value
+
 
 class ReconcileApp(App):
     """A Textual app to reconcile accounts."""
 
     CSS_PATH = "reconcile.tcss"
-
     BINDINGS = [
         ("d", "toggle_dark", "Toggle dark mode"),
     ]
+    DEFAULT_WRITE_OFF_ACCOUNT = "Losses"
 
-    DUMMY_DATA = {
-        "Dummy:Foo": 1250.20,
-        "Dummy:Bar": 404,
-        "Dummy:Baz": 0,
-        "Dummy2:Baz": 190000.0,
-    }
-    DUMMY_DATE = "2023-11-12"
-    DUMMY_WRITE_OFF_ACCOUNT = "Losses"
-    DUMMY_CURRENCY = "PLN"
+    currency = reactive('')
 
     def compose(self) -> ComposeResult:
         """Called to add widgets to the app."""
         yield Header()
         yield Footer()
-        with ScrollableContainer(id="sets"):
-            for k in self.DUMMY_DATA:
-                yield Account(id=k)
+        yield ScrollableContainer(id="list")
         with Horizontal(id="bottom"):
             with Vertical():
-                yield Button("Load", id="load")
-                yield Button("Quit and reconcile", id="quit")
+                yield Button("Reload data", id="load")
+                yield Button("Reconcile and Quit", id="quit")
+                with Horizontal():
+                    yield Label("Write-off account:")
+                    yield Input(self.DEFAULT_WRITE_OFF_ACCOUNT, id='write-off')
             yield RichLog()
 
-    def on_button_pressed(self, event: Button.Pressed):
-        if event.button.id == "load":
-            self.load_data()
-        elif event.button.id == "quit":
-            postings = []
-            write_off = 0
-            for acct in self.query(Account):
-                postings.append(f"  {acct.id}  = {acct.actual:.2f} {self.DUMMY_CURRENCY}")
-                write_off += acct.diff
-            postings.append(f"  {self.DUMMY_WRITE_OFF_ACCOUNT}  {-write_off:.2f} {self.DUMMY_CURRENCY}")
-            reconcile_transaction = "\n".join([f"{self.DUMMY_DATE} reconcile", *postings])
-            self.exit(reconcile_transaction)
+    @on(Button.Pressed, '#quit')
+    def reconcile_and_quit(self):
+        self.exit(self.reconcile())
 
-    def on_mount(self):
-        self.load_data()
-
-    def load_data(self):
+    def reconcile(self) -> str:
+        """Reconcile returns a reconciliation transaction text based on current data."""
+        postings = []
+        write_off = 0
         for acct in self.query(Account):
-            val = self.DUMMY_DATA[acct.id]
-            self.query_one(RichLog).write(f"Setting {acct} to {val}")
-            acct.booked = val
+            write_off += acct.diff
+            postings.append(f"    {acct.id}  = {acct.actual:.2f} {self.currency}")
+        write_off_acct = self.query_one('#write-off').value
+        postings.append(f"    {write_off_acct}  {-write_off:.2f} {self.currency}")
+        return "\n".join([f"{datetime.date.today()} reconcile", *postings])
+
+    @on(Mount)
+    @on(Button.Pressed, '#load')
+    def load_data(self):
+        list = self.query_one('#list')
+        log = self.query_one(RichLog)
+        log.clear()
+        try:
+            list.loading = True
+            self.currency, data, other_currency_data = retrieve_data(
+                "ledger balance --no-total --empty --flat $(cat .reconcile-accounts)")
+            list.loading = False
+        except subprocess.CalledProcessError as e:
+            log.write(e)
+            log.write(e.stderr)
+            log.write(e.stdout)
+            return
+        except Exception as e:
+            log.write(e)
+            return
+
+        for curr, curr_data in other_currency_data:
+            for acct, val in curr_data.items():
+                log.write(f"Note: Also found {val} {curr} in {acct}")
+
+        for acct in self.query(Account):
+            if acct.id not in data:
+                continue
+            acct.booked = data[acct.id]
+            del data[acct.id]
+
+        for k, v in sorted(data.items()):
+            a = Account(id=k)
+            list.mount(a)
+            a.call_later(a.set_booked, v)
 
     def on_account_bad_value(self, msg: Account.BadValue):
         self.query_one(RichLog).write(f"Bad value: {msg.value}: {msg.error}")
@@ -146,6 +176,45 @@ class ReconcileApp(App):
     def action_toggle_dark(self) -> None:
         """An action to toggle dark mode."""
         self.dark = not self.dark
+
+
+_LEDGER_BALANCE_LINE_PATTERN = re.compile(r'^ *(?:(?P<null>0)|(?P<amount>-?[\d.]+) +(?P<currency>\w+)) *(?P<account>[\w:]*) *$')
+
+
+def run_ledger(command):
+    ledger = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
+    if ledger.stderr:
+        raise Exception(ledger.stderr)
+    return ledger.stdout.splitlines()
+
+def retrieve_data(command):
+    account = None
+    data = {}
+    empty_accounts = {}
+    for line in reversed(run_ledger(command)):
+        line = line.rstrip()
+        if not line:
+            continue
+        m = _LEDGER_BALANCE_LINE_PATTERN.match(line)
+        if not m:
+            raise Exception(f'Unrecognized ledger balance line {line}')
+        if m.group('account'):
+            account = m.group('account')
+        if m.group('null') == '0':
+            empty_accounts[account] = 0
+            continue
+        currency = m.group('currency')
+        amount = m.group('amount')
+        if currency not in data:
+            data[currency] = {}
+        data[currency][account] = float(amount)
+    if not data:
+        raise Exception("No data found")
+
+    currency_accounts_pairs = sorted(data.items(), key=lambda x: len(x[1]), reverse=True)
+    primary_currency, primary_accounts = currency_accounts_pairs[0]
+    other_currency_data = sorted(currency_accounts_pairs[1:])
+    return primary_currency, primary_accounts | empty_accounts, other_currency_data
 
 
 if __name__ == "__main__":
