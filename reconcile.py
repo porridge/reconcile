@@ -25,8 +25,28 @@ from textual.containers import ScrollableContainer
 from textual.events import Mount
 from textual.message import Message
 from textual.reactive import reactive
+from textual.widget import Widget
 from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
 from textual.containers import Horizontal, Vertical
+
+
+class RightInput(Widget):
+    """An input which pretends to be right-aligned."""
+
+    DEFAULT_CSS = """
+    RightInput {
+        height: auto;
+        align-horizontal: right;
+        background: $background;
+    }
+
+    RightInput Input {
+        width: auto;
+        background: $background;
+    }
+    """
+    def compose(self) -> ComposeResult:
+        yield Input()
 
 
 class Account(Static):
@@ -47,7 +67,7 @@ class Account(Static):
         with Horizontal(id="numbers"):
             yield Static("0.00", id="booked")
             yield Static("0.00", id="diff")
-            yield Input()
+            yield RightInput()
 
     class BadValue(Message):
         """Something is wrong with the entered value."""
@@ -63,6 +83,7 @@ class Account(Static):
         except Exception as e:
             self.post_message(self.BadValue(event.value, e))
         else:
+            event.control.value = "%.2f" % val
             self.actual = val
             self.confirmed = True
 

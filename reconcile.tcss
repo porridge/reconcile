@@ -46,8 +46,11 @@ Account {
     background: $boost;
 }
 
-Input {
+RightInput {
     width: 20;
+}
+
+RightInput Input {
     border: none;
 }
 
